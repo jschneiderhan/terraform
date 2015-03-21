@@ -52,7 +52,7 @@ func resourceDigitalOceanDroplet() *schema.Resource {
 			},
 
 			"backups": &schema.Schema{
-				Type:     schema.TypeString,
+				Type:     schema.TypeBool,
 				Optional: true,
 			},
 
@@ -112,15 +112,15 @@ func resourceDigitalOceanDropletCreate(d *schema.ResourceData, meta interface{})
 	}
 
 	if attr, ok := d.GetOk("backups"); ok {
-		opts.Backups = attr.(string)
+		opts.Backups = attr.(bool)
 	}
 
-	if attr, ok := d.GetOk("ipv6"); ok && attr.(bool) {
-		opts.IPV6 = "true"
+	if attr, ok := d.GetOk("ipv6"); ok {
+		opts.IPV6 = attr.(bool)
 	}
 
-	if attr, ok := d.GetOk("private_networking"); ok && attr.(bool) {
-		opts.PrivateNetworking = "true"
+	if attr, ok := d.GetOk("private_networking"); ok {
+		opts.PrivateNetworking = attr.(bool)
 	}
 
 	if attr, ok := d.GetOk("user_data"); ok {
@@ -151,7 +151,6 @@ func resourceDigitalOceanDropletCreate(d *schema.ResourceData, meta interface{})
 	log.Printf("[INFO] Droplet ID: %s", d.Id())
 
 	_, err = WaitForDropletAttribute(d, "active", []string{"new"}, "status", meta)
-
 	if err != nil {
 		return fmt.Errorf(
 			"Error waiting for droplet (%s) to become ready: %s", d.Id(), err)
@@ -165,7 +164,6 @@ func resourceDigitalOceanDropletRead(d *schema.ResourceData, meta interface{}) e
 
 	// Retrieve the droplet properties for updating the state
 	droplet, err := client.RetrieveDroplet(d.Id())
-
 	if err != nil {
 		return fmt.Errorf("Error retrieving droplet: %s", err)
 	}
@@ -219,7 +217,6 @@ func resourceDigitalOceanDropletUpdate(d *schema.ResourceData, meta interface{})
 
 		// Wait for power off
 		_, err = WaitForDropletAttribute(d, "off", []string{"active"}, "status", client)
-
 		if err != nil {
 			return fmt.Errorf(
 				"Error waiting for droplet (%s) to become powered off: %s", d.Id(), err)
@@ -227,7 +224,6 @@ func resourceDigitalOceanDropletUpdate(d *schema.ResourceData, meta interface{})
 
 		// Resize the droplet
 		err = client.Resize(d.Id(), newSize.(string))
-
 		if err != nil {
 			newErr := powerOnAndWait(d, meta)
 			if newErr != nil {
@@ -261,7 +257,6 @@ func resourceDigitalOceanDropletUpdate(d *schema.ResourceData, meta interface{})
 
 		// Wait for power off
 		_, err = WaitForDropletAttribute(d, "active", []string{"off"}, "status", meta)
-
 		if err != nil {
 			return err
 		}
@@ -331,10 +326,18 @@ func resourceDigitalOceanDropletUpdate(d *schema.ResourceData, meta interface{})
 func resourceDigitalOceanDropletDelete(d *schema.ResourceData, meta interface{}) error {
 	client := meta.(*digitalocean.Client)
 
+	_, err := WaitForDropletAttribute(
+		d, "false", []string{"", "true"}, "locked", meta)
+
+	if err != nil {
+		return fmt.Errorf(
+			"Error waiting for droplet to be unlocked for destroy (%s): %s", d.Id(), err)
+	}
+
 	log.Printf("[INFO] Deleting droplet: %s", d.Id())
 
 	// Destroy the droplet
-	err := client.DestroyDroplet(d.Id())
+	err = client.DestroyDroplet(d.Id())
 
 	// Handle remotely destroyed droplets
 	if err != nil && strings.Contains(err.Error(), "404 Not Found") {
@@ -360,9 +363,14 @@ func WaitForDropletAttribute(
 		Pending:    pending,
 		Target:     target,
 		Refresh:    newDropletStateRefreshFunc(d, attribute, meta),
-		Timeout:    10 * time.Minute,
+		Timeout:    60 * time.Minute,
 		Delay:      10 * time.Second,
 		MinTimeout: 3 * time.Second,
+
+		// This is a hack around DO API strangeness.
+		// https://github.com/hashicorp/terraform/issues/481
+		//
+		NotFoundChecks: 60,
 	}
 
 	return stateConf.WaitForState()
@@ -375,7 +383,6 @@ func newDropletStateRefreshFunc(
 	client := meta.(*digitalocean.Client)
 	return func() (interface{}, string, error) {
 		err := resourceDigitalOceanDropletRead(d, meta)
-
 		if err != nil {
 			return nil, "", err
 		}
@@ -392,7 +399,6 @@ func newDropletStateRefreshFunc(
 		if attr, ok := d.GetOk(attribute); ok {
 			// Retrieve the droplet properties
 			droplet, err := client.RetrieveDroplet(d.Id())
-
 			if err != nil {
 				return nil, "", fmt.Errorf("Error retrieving droplet: %s", err)
 			}
@@ -408,14 +414,12 @@ func newDropletStateRefreshFunc(
 func powerOnAndWait(d *schema.ResourceData, meta interface{}) error {
 	client := meta.(*digitalocean.Client)
 	err := client.PowerOn(d.Id())
-
 	if err != nil {
 		return err
 	}
 
 	// Wait for power on
 	_, err = WaitForDropletAttribute(d, "active", []string{"off"}, "status", client)
-
 	if err != nil {
 		return err
 	}

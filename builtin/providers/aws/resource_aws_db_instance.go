@@ -3,13 +3,14 @@ package aws
 import (
 	"fmt"
 	"log"
-	"strings"
 	"time"
+
+	"github.com/hashicorp/aws-sdk-go/aws"
+	"github.com/hashicorp/aws-sdk-go/gen/rds"
 
 	"github.com/hashicorp/terraform/helper/hashcode"
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/helper/schema"
-	"github.com/mitchellh/goamz/rds"
 )
 
 func resourceAwsDbInstance() *schema.Resource {
@@ -49,9 +50,22 @@ func resourceAwsDbInstance() *schema.Resource {
 				ForceNew: true,
 			},
 
+			"storage_encrypted": &schema.Schema{
+				Type:     schema.TypeBool,
+				Optional: true,
+				ForceNew: true,
+			},
+
 			"allocated_storage": &schema.Schema{
 				Type:     schema.TypeInt,
 				Required: true,
+				ForceNew: true,
+			},
+
+			"storage_type": &schema.Schema{
+				Type:     schema.TypeString,
+				Optional: true,
+				Computed: true,
 				ForceNew: true,
 			},
 
@@ -77,8 +91,8 @@ func resourceAwsDbInstance() *schema.Resource {
 			"backup_retention_period": &schema.Schema{
 				Type:     schema.TypeInt,
 				Optional: true,
-				Computed: true,
 				ForceNew: true,
+				Default:  1,
 			},
 
 			"backup_window": &schema.Schema{
@@ -142,7 +156,6 @@ func resourceAwsDbInstance() *schema.Resource {
 			"final_snapshot_identifier": &schema.Schema{
 				Type:     schema.TypeString,
 				Optional: true,
-				ForceNew: true,
 			},
 
 			"db_subnet_group_name": &schema.Schema{
@@ -178,59 +191,59 @@ func resourceAwsDbInstance() *schema.Resource {
 
 func resourceAwsDbInstanceCreate(d *schema.ResourceData, meta interface{}) error {
 	conn := meta.(*AWSClient).rdsconn
-	opts := rds.CreateDBInstance{
-		AllocatedStorage:     d.Get("allocated_storage").(int),
-		SetAllocatedStorage:  true,
-		DBInstanceClass:      d.Get("instance_class").(string),
-		DBInstanceIdentifier: d.Get("identifier").(string),
-		DBName:               d.Get("name").(string),
-		MasterUsername:       d.Get("username").(string),
-		MasterUserPassword:   d.Get("password").(string),
-		Engine:               d.Get("engine").(string),
-		EngineVersion:        d.Get("engine_version").(string),
+	opts := rds.CreateDBInstanceMessage{
+		AllocatedStorage:     aws.Integer(d.Get("allocated_storage").(int)),
+		DBInstanceClass:      aws.String(d.Get("instance_class").(string)),
+		DBInstanceIdentifier: aws.String(d.Get("identifier").(string)),
+		DBName:               aws.String(d.Get("name").(string)),
+		MasterUsername:       aws.String(d.Get("username").(string)),
+		MasterUserPassword:   aws.String(d.Get("password").(string)),
+		Engine:               aws.String(d.Get("engine").(string)),
+		EngineVersion:        aws.String(d.Get("engine_version").(string)),
+		StorageEncrypted:     aws.Boolean(d.Get("storage_encrypted").(bool)),
 	}
 
-	if attr, ok := d.GetOk("backup_retention_period"); ok {
-		opts.BackupRetentionPeriod = attr.(int)
-		opts.SetBackupRetentionPeriod = true
+	if attr, ok := d.GetOk("storage_type"); ok {
+		opts.StorageType = aws.String(attr.(string))
 	}
+
+	attr := d.Get("backup_retention_period")
+	opts.BackupRetentionPeriod = aws.Integer(attr.(int))
 
 	if attr, ok := d.GetOk("iops"); ok {
-		opts.Iops = attr.(int)
-		opts.SetIops = true
+		opts.IOPS = aws.Integer(attr.(int))
 	}
 
 	if attr, ok := d.GetOk("port"); ok {
-		opts.Port = attr.(int)
-		opts.SetPort = true
+		opts.Port = aws.Integer(attr.(int))
 	}
 
 	if attr, ok := d.GetOk("multi_az"); ok {
-		opts.MultiAZ = attr.(bool)
+		opts.MultiAZ = aws.Boolean(attr.(bool))
 	}
 
 	if attr, ok := d.GetOk("availability_zone"); ok {
-		opts.AvailabilityZone = attr.(string)
+		opts.AvailabilityZone = aws.String(attr.(string))
 	}
 
 	if attr, ok := d.GetOk("maintenance_window"); ok {
-		opts.PreferredMaintenanceWindow = attr.(string)
+		opts.PreferredMaintenanceWindow = aws.String(attr.(string))
 	}
 
 	if attr, ok := d.GetOk("backup_window"); ok {
-		opts.PreferredBackupWindow = attr.(string)
+		opts.PreferredBackupWindow = aws.String(attr.(string))
 	}
 
 	if attr, ok := d.GetOk("publicly_accessible"); ok {
-		opts.PubliclyAccessible = attr.(bool)
+		opts.PubliclyAccessible = aws.Boolean(attr.(bool))
 	}
 
 	if attr, ok := d.GetOk("db_subnet_group_name"); ok {
-		opts.DBSubnetGroupName = attr.(string)
+		opts.DBSubnetGroupName = aws.String(attr.(string))
 	}
 
 	if attr, ok := d.GetOk("parameter_group_name"); ok {
-		opts.DBParameterGroupName = attr.(string)
+		opts.DBParameterGroupName = aws.String(attr.(string))
 	}
 
 	if attr := d.Get("vpc_security_group_ids").(*schema.Set); attr.Len() > 0 {
@@ -238,7 +251,7 @@ func resourceAwsDbInstanceCreate(d *schema.ResourceData, meta interface{}) error
 		for _, v := range attr.List() {
 			s = append(s, v.(string))
 		}
-		opts.VpcSecurityGroupIds = s
+		opts.VPCSecurityGroupIDs = s
 	}
 
 	if attr := d.Get("security_group_names").(*schema.Set); attr.Len() > 0 {
@@ -246,7 +259,7 @@ func resourceAwsDbInstanceCreate(d *schema.ResourceData, meta interface{}) error
 		for _, v := range attr.List() {
 			s = append(s, v.(string))
 		}
-		opts.DBSecurityGroupNames = s
+		opts.DBSecurityGroups = s
 	}
 
 	log.Printf("[DEBUG] DB Instance create configuration: %#v", opts)
@@ -266,7 +279,7 @@ func resourceAwsDbInstanceCreate(d *schema.ResourceData, meta interface{}) error
 		Pending:    []string{"creating", "backing-up", "modifying"},
 		Target:     "available",
 		Refresh:    resourceAwsDbInstanceStateRefreshFunc(d, meta),
-		Timeout:    20 * time.Minute,
+		Timeout:    40 * time.Minute,
 		MinTimeout: 10 * time.Second,
 		Delay:      30 * time.Second, // Wait 30 secs before starting
 	}
@@ -291,23 +304,29 @@ func resourceAwsDbInstanceRead(d *schema.ResourceData, meta interface{}) error {
 		return nil
 	}
 
-	d.Set("name", v.DBName)
-	d.Set("username", v.MasterUsername)
-	d.Set("engine", v.Engine)
-	d.Set("engine_version", v.EngineVersion)
-	d.Set("allocated_storage", v.AllocatedStorage)
-	d.Set("instance_class", v.DBInstanceClass)
-	d.Set("availability_zone", v.AvailabilityZone)
-	d.Set("backup_retention_period", v.BackupRetentionPeriod)
-	d.Set("backup_window", v.PreferredBackupWindow)
-	d.Set("maintenance_window", v.PreferredMaintenanceWindow)
-	d.Set("multi_az", v.MultiAZ)
-	d.Set("port", v.Port)
-	d.Set("db_subnet_group_name", v.DBSubnetGroup.Name)
-	d.Set("parameter_group_name", v.DBParameterGroupName)
-	d.Set("address", v.Address)
-	d.Set("endpoint", fmt.Sprintf("%s:%d", v.Address, v.Port))
-	d.Set("status", v.DBInstanceStatus)
+	d.Set("name", *v.DBName)
+	d.Set("username", *v.MasterUsername)
+	d.Set("engine", *v.Engine)
+	d.Set("engine_version", *v.EngineVersion)
+	d.Set("allocated_storage", *v.AllocatedStorage)
+	d.Set("storage_type", *v.StorageType)
+	d.Set("instance_class", *v.DBInstanceClass)
+	d.Set("availability_zone", *v.AvailabilityZone)
+	d.Set("backup_retention_period", *v.BackupRetentionPeriod)
+	d.Set("backup_window", *v.PreferredBackupWindow)
+	d.Set("maintenance_window", *v.PreferredMaintenanceWindow)
+	d.Set("multi_az", *v.MultiAZ)
+	d.Set("port", *v.Endpoint.Port)
+	d.Set("db_subnet_group_name", *v.DBSubnetGroup.DBSubnetGroupName)
+
+	if len(v.DBParameterGroups) > 0 {
+		d.Set("parameter_group_name", *v.DBParameterGroups[0].DBParameterGroupName)
+	}
+
+	d.Set("address", *v.Endpoint.Address)
+	d.Set("endpoint", fmt.Sprintf("%s:%d", *v.Endpoint.Address, *v.Endpoint.Port))
+	d.Set("status", *v.DBInstanceStatus)
+	d.Set("storage_encrypted", *v.StorageEncrypted)
 
 	// Create an empty schema.Set to hold all vpc security group ids
 	ids := &schema.Set{
@@ -315,8 +334,8 @@ func resourceAwsDbInstanceRead(d *schema.ResourceData, meta interface{}) error {
 			return hashcode.String(v.(string))
 		},
 	}
-	for _, v := range v.VpcSecurityGroupIds {
-		ids.Add(v)
+	for _, v := range v.VPCSecurityGroups {
+		ids.Add(*v.VPCSecurityGroupID)
 	}
 	d.Set("vpc_security_group_ids", ids)
 
@@ -326,8 +345,8 @@ func resourceAwsDbInstanceRead(d *schema.ResourceData, meta interface{}) error {
 			return hashcode.String(v.(string))
 		},
 	}
-	for _, v := range v.DBSecurityGroupNames {
-		sgn.Add(v)
+	for _, v := range v.DBSecurityGroups {
+		sgn.Add(*v.DBSecurityGroupName)
 	}
 	d.Set("security_group_names", sgn)
 
@@ -339,13 +358,13 @@ func resourceAwsDbInstanceDelete(d *schema.ResourceData, meta interface{}) error
 
 	log.Printf("[DEBUG] DB Instance destroy: %v", d.Id())
 
-	opts := rds.DeleteDBInstance{DBInstanceIdentifier: d.Id()}
+	opts := rds.DeleteDBInstanceMessage{DBInstanceIdentifier: aws.String(d.Id())}
 
 	finalSnapshot := d.Get("final_snapshot_identifier").(string)
 	if finalSnapshot == "" {
-		opts.SkipFinalSnapshot = true
+		opts.SkipFinalSnapshot = aws.Boolean(true)
 	} else {
-		opts.FinalDBSnapshotIdentifier = finalSnapshot
+		opts.FinalDBSnapshotIdentifier = aws.String(finalSnapshot)
 	}
 
 	log.Printf("[DEBUG] DB Instance destroy configuration: %v", opts)
@@ -360,7 +379,7 @@ func resourceAwsDbInstanceDelete(d *schema.ResourceData, meta interface{}) error
 			"modifying", "deleting", "available"},
 		Target:     "",
 		Refresh:    resourceAwsDbInstanceStateRefreshFunc(d, meta),
-		Timeout:    20 * time.Minute,
+		Timeout:    40 * time.Minute,
 		MinTimeout: 10 * time.Second,
 		Delay:      30 * time.Second, // Wait 30 secs before starting
 	}
@@ -375,8 +394,8 @@ func resourceAwsBbInstanceRetrieve(
 	d *schema.ResourceData, meta interface{}) (*rds.DBInstance, error) {
 	conn := meta.(*AWSClient).rdsconn
 
-	opts := rds.DescribeDBInstances{
-		DBInstanceIdentifier: d.Id(),
+	opts := rds.DescribeDBInstancesMessage{
+		DBInstanceIdentifier: aws.String(d.Id()),
 	}
 
 	log.Printf("[DEBUG] DB Instance describe configuration: %#v", opts)
@@ -384,14 +403,15 @@ func resourceAwsBbInstanceRetrieve(
 	resp, err := conn.DescribeDBInstances(&opts)
 
 	if err != nil {
-		if strings.Contains(err.Error(), "DBInstanceNotFound") {
+		dbinstanceerr, ok := err.(aws.APIError)
+		if ok && dbinstanceerr.Code == "DBInstanceNotFound" {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("Error retrieving DB Instances: %s", err)
 	}
 
 	if len(resp.DBInstances) != 1 ||
-		resp.DBInstances[0].DBInstanceIdentifier != d.Id() {
+		*resp.DBInstances[0].DBInstanceIdentifier != d.Id() {
 		if err != nil {
 			return nil, nil
 		}
@@ -416,6 +436,6 @@ func resourceAwsDbInstanceStateRefreshFunc(
 			return nil, "", nil
 		}
 
-		return v, v.DBInstanceStatus, nil
+		return v, *v.DBInstanceStatus, nil
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform/config/module"
@@ -131,6 +132,43 @@ func testStateFile(t *testing.T, s *terraform.State) string {
 	return path
 }
 
+// testStateFileDefault writes the state out to the default statefile
+// in the cwd. Use `testCwd` to change into a temp cwd.
+func testStateFileDefault(t *testing.T, s *terraform.State) string {
+	f, err := os.Create(DefaultStateFilename)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+	defer f.Close()
+
+	if err := terraform.WriteState(s, f); err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	return DefaultStateFilename
+}
+
+// testStateOutput tests that the state at the given path contains
+// the expected state string.
+func testStateOutput(t *testing.T, path string, expected string) {
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	newState, err := terraform.ReadState(f)
+	f.Close()
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	actual := strings.TrimSpace(newState.String())
+	expected = strings.TrimSpace(expected)
+	if actual != expected {
+		t.Fatalf("bad:\n\n%s", actual)
+	}
+}
+
 func testProvider() *terraform.MockResourceProvider {
 	p := new(terraform.MockResourceProvider)
 	p.DiffReturn = &terraform.InstanceDiff{}
@@ -175,20 +213,23 @@ func testTempDir(t *testing.T) string {
 	return d
 }
 
-// testCwdDir is used to change the current working directory
+// testCwd is used to change the current working directory
 // into a test directory that should be remoted after
 func testCwd(t *testing.T) (string, string) {
-	tmp, err := ioutil.TempDir("", "remote")
+	tmp, err := ioutil.TempDir("", "tf")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
+
 	if err := os.Chdir(tmp); err != nil {
 		t.Fatalf("err: %v", err)
 	}
+
 	return tmp, cwd
 }
 
@@ -197,6 +238,7 @@ func testFixCwd(t *testing.T, tmp, cwd string) {
 	if err := os.Chdir(cwd); err != nil {
 		t.Fatalf("err: %v", err)
 	}
+
 	if err := os.RemoveAll(tmp); err != nil {
 		t.Fatalf("err: %v", err)
 	}

@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/hashicorp/aws-sdk-go/aws"
+	"github.com/hashicorp/aws-sdk-go/gen/rds"
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/terraform"
-	"github.com/mitchellh/goamz/rds"
 )
 
 func TestAccAWSDBParameterGroup(t *testing.T) {
@@ -114,19 +115,19 @@ func testAccCheckAWSDBParameterGroupDestroy(s *terraform.State) error {
 
 		// Try to find the Group
 		resp, err := conn.DescribeDBParameterGroups(
-			&rds.DescribeDBParameterGroups{
-				DBParameterGroupName: rs.Primary.ID,
+			&rds.DescribeDBParameterGroupsMessage{
+				DBParameterGroupName: aws.String(rs.Primary.ID),
 			})
 
 		if err == nil {
 			if len(resp.DBParameterGroups) != 0 &&
-				resp.DBParameterGroups[0].DBParameterGroupName == rs.Primary.ID {
+				*resp.DBParameterGroups[0].DBParameterGroupName == rs.Primary.ID {
 				return fmt.Errorf("DB Parameter Group still exists")
 			}
 		}
 
 		// Verify the error
-		newerr, ok := err.(*rds.Error)
+		newerr, ok := err.(aws.APIError)
 		if !ok {
 			return err
 		}
@@ -141,15 +142,15 @@ func testAccCheckAWSDBParameterGroupDestroy(s *terraform.State) error {
 func testAccCheckAWSDBParameterGroupAttributes(v *rds.DBParameterGroup) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 
-		if v.DBParameterGroupName != "parameter-group-test-terraform" {
+		if *v.DBParameterGroupName != "parameter-group-test-terraform" {
 			return fmt.Errorf("bad name: %#v", v.DBParameterGroupName)
 		}
 
-		if v.DBParameterGroupFamily != "mysql5.6" {
+		if *v.DBParameterGroupFamily != "mysql5.6" {
 			return fmt.Errorf("bad family: %#v", v.DBParameterGroupFamily)
 		}
 
-		if v.Description != "Test parameter group for terraform" {
+		if *v.Description != "Test parameter group for terraform" {
 			return fmt.Errorf("bad description: %#v", v.Description)
 		}
 
@@ -170,8 +171,8 @@ func testAccCheckAWSDBParameterGroupExists(n string, v *rds.DBParameterGroup) re
 
 		conn := testAccProvider.Meta().(*AWSClient).rdsconn
 
-		opts := rds.DescribeDBParameterGroups{
-			DBParameterGroupName: rs.Primary.ID,
+		opts := rds.DescribeDBParameterGroupsMessage{
+			DBParameterGroupName: aws.String(rs.Primary.ID),
 		}
 
 		resp, err := conn.DescribeDBParameterGroups(&opts)
@@ -181,7 +182,7 @@ func testAccCheckAWSDBParameterGroupExists(n string, v *rds.DBParameterGroup) re
 		}
 
 		if len(resp.DBParameterGroups) != 1 ||
-			resp.DBParameterGroups[0].DBParameterGroupName != rs.Primary.ID {
+			*resp.DBParameterGroups[0].DBParameterGroupName != rs.Primary.ID {
 			return fmt.Errorf("DB Parameter Group not found")
 		}
 

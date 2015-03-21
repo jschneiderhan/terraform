@@ -1,16 +1,19 @@
 package aws
 
 import (
+	"bytes"
 	"crypto/sha1"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"log"
 	"time"
 
+	"github.com/hashicorp/aws-sdk-go/aws"
+	"github.com/hashicorp/aws-sdk-go/gen/autoscaling"
 	"github.com/hashicorp/terraform/helper/hashcode"
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/helper/schema"
-	"github.com/mitchellh/goamz/autoscaling"
 )
 
 func resourceAwsLaunchConfiguration() *schema.Resource {
@@ -142,7 +145,17 @@ func resourceAwsLaunchConfiguration() *schema.Resource {
 						},
 					},
 				},
-				Set: resourceAwsInstanceBlockDevicesHash,
+				Set: func(v interface{}) int {
+					var buf bytes.Buffer
+					m := v.(map[string]interface{})
+					buf.WriteString(fmt.Sprintf("%t-", m["delete_on_termination"].(bool)))
+					buf.WriteString(fmt.Sprintf("%s-", m["device_name"].(string)))
+					// See the NOTE in "ebs_block_device" for why we skip iops here.
+					// buf.WriteString(fmt.Sprintf("%d-", m["iops"].(int)))
+					buf.WriteString(fmt.Sprintf("%d-", m["volume_size"].(int)))
+					buf.WriteString(fmt.Sprintf("%s-", m["volume_type"].(string)))
+					return hashcode.String(buf.String())
+				},
 			},
 		},
 	}
@@ -151,15 +164,26 @@ func resourceAwsLaunchConfiguration() *schema.Resource {
 func resourceAwsLaunchConfigurationCreate(d *schema.ResourceData, meta interface{}) error {
 	autoscalingconn := meta.(*AWSClient).autoscalingconn
 
-	var createLaunchConfigurationOpts autoscaling.CreateLaunchConfiguration
-	createLaunchConfigurationOpts.Name = d.Get("name").(string)
-	createLaunchConfigurationOpts.IamInstanceProfile = d.Get("iam_instance_profile").(string)
-	createLaunchConfigurationOpts.ImageId = d.Get("image_id").(string)
-	createLaunchConfigurationOpts.InstanceType = d.Get("instance_type").(string)
-	createLaunchConfigurationOpts.KeyName = d.Get("key_name").(string)
-	createLaunchConfigurationOpts.UserData = d.Get("user_data").(string)
-	createLaunchConfigurationOpts.AssociatePublicIpAddress = d.Get("associate_public_ip_address").(bool)
-	createLaunchConfigurationOpts.SpotPrice = d.Get("spot_price").(string)
+	var createLaunchConfigurationOpts autoscaling.CreateLaunchConfigurationType
+	createLaunchConfigurationOpts.LaunchConfigurationName = aws.String(d.Get("name").(string))
+	createLaunchConfigurationOpts.ImageID = aws.String(d.Get("image_id").(string))
+	createLaunchConfigurationOpts.InstanceType = aws.String(d.Get("instance_type").(string))
+
+	if v, ok := d.GetOk("user_data"); ok {
+		createLaunchConfigurationOpts.UserData = aws.String(base64.StdEncoding.EncodeToString([]byte(v.(string))))
+	}
+	if v, ok := d.GetOk("associate_public_ip_address"); ok {
+		createLaunchConfigurationOpts.AssociatePublicIPAddress = aws.Boolean(v.(bool))
+	}
+	if v, ok := d.GetOk("iam_instance_profile"); ok {
+		createLaunchConfigurationOpts.IAMInstanceProfile = aws.String(v.(string))
+	}
+	if v, ok := d.GetOk("key_name"); ok {
+		createLaunchConfigurationOpts.KeyName = aws.String(v.(string))
+	}
+	if v, ok := d.GetOk("spot_price"); ok {
+		createLaunchConfigurationOpts.SpotPrice = aws.String(v.(string))
+	}
 
 	if v, ok := d.GetOk("security_groups"); ok {
 		createLaunchConfigurationOpts.SecurityGroups = expandStringList(
@@ -169,22 +193,21 @@ func resourceAwsLaunchConfigurationCreate(d *schema.ResourceData, meta interface
 	if v := d.Get("block_device"); v != nil {
 		vs := v.(*schema.Set).List()
 		if len(vs) > 0 {
-			createLaunchConfigurationOpts.BlockDevices = make([]autoscaling.BlockDeviceMapping, len(vs))
+			createLaunchConfigurationOpts.BlockDeviceMappings = make([]autoscaling.BlockDeviceMapping, len(vs))
 			for i, v := range vs {
 				bd := v.(map[string]interface{})
-				createLaunchConfigurationOpts.BlockDevices[i].DeviceName = bd["device_name"].(string)
-				createLaunchConfigurationOpts.BlockDevices[i].VirtualName = bd["virtual_name"].(string)
-				createLaunchConfigurationOpts.BlockDevices[i].SnapshotId = bd["snapshot_id"].(string)
-				createLaunchConfigurationOpts.BlockDevices[i].VolumeType = bd["volume_type"].(string)
-				createLaunchConfigurationOpts.BlockDevices[i].VolumeSize = int64(bd["volume_size"].(int))
-				createLaunchConfigurationOpts.BlockDevices[i].DeleteOnTermination = bd["delete_on_termination"].(bool)
-				createLaunchConfigurationOpts.BlockDevices[i].Encrypted = bd["encrypted"].(bool)
+				createLaunchConfigurationOpts.BlockDeviceMappings[i].DeviceName = bd["device_name"].(aws.StringValue)
+				createLaunchConfigurationOpts.BlockDeviceMappings[i].VirtualName = bd["virtual_name"].(aws.StringValue)
+				createLaunchConfigurationOpts.BlockDeviceMappings[i].EBS.SnapshotID = bd["snapshot_id"].(aws.StringValue)
+				createLaunchConfigurationOpts.BlockDeviceMappings[i].EBS.VolumeType = bd["volume_type"].(aws.StringValue)
+				createLaunchConfigurationOpts.BlockDeviceMappings[i].EBS.VolumeSize = bd["volume_size"].(aws.IntegerValue)
+				createLaunchConfigurationOpts.BlockDeviceMappings[i].EBS.DeleteOnTermination = bd["delete_on_termination"].(aws.BooleanValue)
 			}
 		}
 	}
 
 	log.Printf("[DEBUG] autoscaling create launch configuration: %#v", createLaunchConfigurationOpts)
-	_, err := autoscalingconn.CreateLaunchConfiguration(&createLaunchConfigurationOpts)
+	err := autoscalingconn.CreateLaunchConfiguration(&createLaunchConfigurationOpts)
 	if err != nil {
 		return fmt.Errorf("Error creating launch configuration: %s", err)
 	}
@@ -202,8 +225,8 @@ func resourceAwsLaunchConfigurationCreate(d *schema.ResourceData, meta interface
 func resourceAwsLaunchConfigurationRead(d *schema.ResourceData, meta interface{}) error {
 	autoscalingconn := meta.(*AWSClient).autoscalingconn
 
-	describeOpts := autoscaling.DescribeLaunchConfigurations{
-		Names: []string{d.Id()},
+	describeOpts := autoscaling.LaunchConfigurationNamesType{
+		LaunchConfigurationNames: []string{d.Id()},
 	}
 
 	log.Printf("[DEBUG] launch configuration describe configuration: %#v", describeOpts)
@@ -217,7 +240,7 @@ func resourceAwsLaunchConfigurationRead(d *schema.ResourceData, meta interface{}
 	}
 
 	// Verify AWS returned our launch configuration
-	if describConfs.LaunchConfigurations[0].Name != d.Id() {
+	if *describConfs.LaunchConfigurations[0].LaunchConfigurationName != d.Id() {
 		return fmt.Errorf(
 			"Unable to find launch configuration: %#v",
 			describConfs.LaunchConfigurations)
@@ -225,25 +248,39 @@ func resourceAwsLaunchConfigurationRead(d *schema.ResourceData, meta interface{}
 
 	lc := describConfs.LaunchConfigurations[0]
 
-	d.Set("key_name", lc.KeyName)
-	d.Set("iam_instance_profile", lc.IamInstanceProfile)
-	d.Set("image_id", lc.ImageId)
-	d.Set("instance_type", lc.InstanceType)
-	d.Set("name", lc.Name)
-	d.Set("security_groups", lc.SecurityGroups)
-	d.Set("spot_price", lc.SpotPrice)
+	d.Set("key_name", *lc.KeyName)
+	d.Set("image_id", *lc.ImageID)
+	d.Set("instance_type", *lc.InstanceType)
+	d.Set("name", *lc.LaunchConfigurationName)
 
-	bds := make([]map[string]interface{}, len(lc.BlockDevices))
-	for i, m := range lc.BlockDevices {
+	bds := make([]map[string]interface{}, len(lc.BlockDeviceMappings))
+	for i, m := range lc.BlockDeviceMappings {
 		bds[i] = make(map[string]interface{})
 		bds[i]["device_name"] = m.DeviceName
-		bds[i]["snapshot_id"] = m.SnapshotId
-		bds[i]["volume_type"] = m.VolumeType
-		bds[i]["volume_size"] = m.VolumeSize
-		bds[i]["delete_on_termination"] = m.DeleteOnTermination
-		bds[i]["encrypted"] = m.Encrypted
+		bds[i]["snapshot_id"] = m.EBS.SnapshotID
+		bds[i]["volume_type"] = m.EBS.VolumeType
+		bds[i]["volume_size"] = m.EBS.VolumeSize
+		bds[i]["delete_on_termination"] = m.EBS.DeleteOnTermination
 	}
 	d.Set("block_device", bds)
+
+	if lc.IAMInstanceProfile != nil {
+		d.Set("iam_instance_profile", *lc.IAMInstanceProfile)
+	} else {
+		d.Set("iam_instance_profile", nil)
+	}
+
+	if lc.SpotPrice != nil {
+		d.Set("spot_price", *lc.SpotPrice)
+	} else {
+		d.Set("spot_price", nil)
+	}
+
+	if lc.SecurityGroups != nil {
+		d.Set("security_groups", lc.SecurityGroups)
+	} else {
+		d.Set("security_groups", nil)
+	}
 
 	return nil
 }
@@ -252,10 +289,10 @@ func resourceAwsLaunchConfigurationDelete(d *schema.ResourceData, meta interface
 	autoscalingconn := meta.(*AWSClient).autoscalingconn
 
 	log.Printf("[DEBUG] Launch Configuration destroy: %v", d.Id())
-	_, err := autoscalingconn.DeleteLaunchConfiguration(
-		&autoscaling.DeleteLaunchConfiguration{Name: d.Id()})
+	err := autoscalingconn.DeleteLaunchConfiguration(
+		&autoscaling.LaunchConfigurationNameType{LaunchConfigurationName: aws.String(d.Id())})
 	if err != nil {
-		autoscalingerr, ok := err.(*autoscaling.Error)
+		autoscalingerr, ok := err.(aws.APIError)
 		if ok && autoscalingerr.Code == "InvalidConfiguration.NotFound" {
 			return nil
 		}

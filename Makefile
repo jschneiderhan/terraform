@@ -12,6 +12,9 @@ bin: generate
 dev: generate
 	@TF_DEV=1 sh -c "'$(CURDIR)/scripts/build.sh'"
 
+quickdev: generate
+	@TF_QUICKDEV=1 TF_DEV=1 sh -c "'$(CURDIR)/scripts/build.sh'"
+
 # test runs the unit tests and vets the code
 test: generate
 	TF_ACC= go test $(TEST) $(TESTARGS) -timeout=30s -parallel=4
@@ -39,6 +42,14 @@ updatedeps:
 		| grep -v github.com/hashicorp/terraform \
 		| sort -u \
 		| xargs go get -f -u -v
+
+cover:
+	@go tool cover 2>/dev/null; if [ $$? -eq 3 ]; then \
+		go get -u golang.org/x/tools/cmd/cover; \
+	fi
+	go test $(TEST) -coverprofile=coverage.out
+	go tool cover -html=coverage.out
+	rm coverage.out
 
 # vet runs the Go source code static analysis tool `vet` to find
 # any common errors.
