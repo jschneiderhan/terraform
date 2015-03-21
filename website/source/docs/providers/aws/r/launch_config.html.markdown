@@ -43,7 +43,6 @@ Each `block_device_mapping` supports the following:
 * `volume_type` - (Optional) The type of volume. Can be standard, gp2, or io1. Defaults to standard.
 * `volume_size` - (Optional) The size of the volume in gigabytes.
 * `delete_on_termination` - (Optional) Should the volume be destroyed on instance termination (defaults true).
-* `encrypted` - (Optional) Should encryption be enabled (defaults false).
 
 ## Attributes Reference
 
