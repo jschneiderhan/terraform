@@ -32,20 +32,6 @@ type ResourceData struct {
 	once        sync.Once
 }
 
-// getSource represents the level we want to get for a value (internally).
-// Any source less than or equal to the level will be loaded (whichever
-// has a value first).
-type getSource byte
-
-const (
-	getSourceState getSource = 1 << iota
-	getSourceConfig
-	getSourceDiff
-	getSourceSet
-	getSourceExact               // Only get from the _exact_ level
-	getSourceLevelMask getSource = getSourceState | getSourceConfig | getSourceDiff | getSourceSet
-)
-
 // getResult is the internal structure that is generated when a Get
 // is called that contains some extra data that might be used.
 type getResult struct {
@@ -79,18 +65,31 @@ func (d *ResourceData) Get(key string) interface{} {
 // set and the new value is. This is common, for example, for boolean
 // fields which have a zero value of false.
 func (d *ResourceData) GetChange(key string) (interface{}, interface{}) {
-	o, n := d.getChange(key, getSourceState, getSourceDiff|getSourceExact)
+	o, n := d.getChange(key, getSourceState, getSourceDiff)
 	return o.Value, n.Value
 }
 
 // GetOk returns the data for the given key and whether or not the key
-// has been set.
+// has been set to a non-zero value at some point.
 //
 // The first result will not necessarilly be nil if the value doesn't exist.
 // The second result should be checked to determine this information.
 func (d *ResourceData) GetOk(key string) (interface{}, bool) {
 	r := d.getRaw(key, getSourceSet)
-	return r.Value, r.Exists && !r.Computed
+	exists := r.Exists && !r.Computed
+	if exists {
+		// If it exists, we also want to verify it is not the zero-value.
+		value := r.Value
+		zero := r.Schema.Type.Zero()
+
+		if eq, ok := value.(Equal); ok {
+			exists = !eq.Equal(zero)
+		} else {
+			exists = !reflect.DeepEqual(value, zero)
+		}
+	}
+
+	return r.Value, exists
 }
 
 func (d *ResourceData) getRaw(key string, level getSource) getResult {
@@ -138,6 +137,25 @@ func (d *ResourceData) Partial(on bool) {
 // will be returned.
 func (d *ResourceData) Set(key string, value interface{}) error {
 	d.once.Do(d.init)
+
+	// If the value is a pointer to a non-struct, get its value and
+	// use that. This allows Set to take a pointer to primitives to
+	// simplify the interface.
+	reflectVal := reflect.ValueOf(value)
+	if reflectVal.Kind() == reflect.Ptr {
+		if reflectVal.IsNil() {
+			// If the pointer is nil, then the value is just nil
+			value = nil
+		} else {
+			// Otherwise, we dereference the pointer as long as its not
+			// a pointer to a struct, since struct pointers are allowed.
+			reflectVal = reflect.Indirect(reflectVal)
+			if reflectVal.Kind() != reflect.Struct {
+				value = reflectVal.Interface()
+			}
+		}
+	}
+
 	return d.setWriter.WriteField(strings.Split(key, "."), value)
 }
 
@@ -375,11 +393,13 @@ func (d *ResourceData) get(addr []string, source getSource) getResult {
 	}
 
 	// If the result doesn't exist, then we set the value to the zero value
-	if result.Value == nil {
-		if schemaL := addrToSchema(addr, d.schema); len(schemaL) > 0 {
-			schema := schemaL[len(schemaL)-1]
-			result.Value = result.ValueOrZero(schema)
-		}
+	var schema *Schema
+	if schemaL := addrToSchema(addr, d.schema); len(schemaL) > 0 {
+		schema = schemaL[len(schemaL)-1]
+	}
+
+	if result.Value == nil && schema != nil {
+		result.Value = result.ValueOrZero(schema)
 	}
 
 	// Transform the FieldReadResult into a getResult. It might be worth
@@ -389,5 +409,6 @@ func (d *ResourceData) get(addr []string, source getSource) getResult {
 		ValueProcessed: result.ValueProcessed,
 		Computed:       result.Computed,
 		Exists:         result.Exists,
+		Schema:         schema,
 	}
 }

@@ -10,6 +10,9 @@ import (
 // Set to true when we're testing
 var test bool = false
 
+// DefaultDataDir is the default directory for storing local data.
+const DefaultDataDir = ".terraform"
+
 // DefaultStateFilename is the default filename used for the state file.
 const DefaultStateFilename = "terraform.tfstate"
 
@@ -30,9 +33,9 @@ func validateContext(ctx *terraform.Context, ui cli.Ui) bool {
 				"fix these before continuing.\n")
 
 		if len(ws) > 0 {
-			ui.Output("Warnings:\n")
+			ui.Warn("Warnings:\n")
 			for _, w := range ws {
-				ui.Output(fmt.Sprintf("  * %s", w))
+				ui.Warn(fmt.Sprintf("  * %s", w))
 			}
 
 			if len(es) > 0 {
@@ -41,13 +44,16 @@ func validateContext(ctx *terraform.Context, ui cli.Ui) bool {
 		}
 
 		if len(es) > 0 {
-			ui.Output("Errors:\n")
+			ui.Error("Errors:\n")
 			for _, e := range es {
-				ui.Output(fmt.Sprintf("  * %s", e))
+				ui.Error(fmt.Sprintf("  * %s", e))
 			}
+			return false
+		} else {
+			ui.Warn(fmt.Sprintf("\n"+
+				"No errors found. Continuing with %d warning(s).\n", len(ws)))
+			return true
 		}
-
-		return false
 	}
 
 	return true

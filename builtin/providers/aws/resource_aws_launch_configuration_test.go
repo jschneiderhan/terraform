@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/hashicorp/aws-sdk-go/aws"
+	"github.com/hashicorp/aws-sdk-go/gen/autoscaling"
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/terraform"
-	"github.com/mitchellh/goamz/autoscaling"
 )
 
 func TestAccAWSLaunchConfiguration(t *testing.T) {
@@ -57,19 +58,19 @@ func testAccCheckAWSLaunchConfigurationDestroy(s *terraform.State) error {
 		}
 
 		describe, err := conn.DescribeLaunchConfigurations(
-			&autoscaling.DescribeLaunchConfigurations{
-				Names: []string{rs.Primary.ID},
+			&autoscaling.LaunchConfigurationNamesType{
+				LaunchConfigurationNames: []string{rs.Primary.ID},
 			})
 
 		if err == nil {
 			if len(describe.LaunchConfigurations) != 0 &&
-				describe.LaunchConfigurations[0].Name == rs.Primary.ID {
+				*describe.LaunchConfigurations[0].LaunchConfigurationName == rs.Primary.ID {
 				return fmt.Errorf("Launch Configuration still exists")
 			}
 		}
 
 		// Verify the error
-		providerErr, ok := err.(*autoscaling.Error)
+		providerErr, ok := err.(aws.APIError)
 		if !ok {
 			return err
 		}
@@ -83,22 +84,22 @@ func testAccCheckAWSLaunchConfigurationDestroy(s *terraform.State) error {
 
 func testAccCheckAWSLaunchConfigurationAttributes(conf *autoscaling.LaunchConfiguration) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
-		if conf.ImageId != "ami-21f78e11" {
-			return fmt.Errorf("Bad image_id: %s", conf.ImageId)
+		if *conf.ImageID != "ami-21f78e11" {
+			return fmt.Errorf("Bad image_id: %s", *conf.ImageID)
 		}
 
-		if conf.Name != "foobar-terraform-test" {
-			return fmt.Errorf("Bad name: %s", conf.Name)
+		if *conf.LaunchConfigurationName != "foobar-terraform-test" {
+			return fmt.Errorf("Bad name: %s", *conf.LaunchConfigurationName)
 		}
 
-		if conf.InstanceType != "t1.micro" {
-			return fmt.Errorf("Bad instance_type: %s", conf.InstanceType)
+		if *conf.InstanceType != "t1.micro" {
+			return fmt.Errorf("Bad instance_type: %s", *conf.InstanceType)
 		}
 
 		// Map out the block devices by name, which should be unique.
 		blockDevices := make(map[string]autoscaling.BlockDeviceMapping)
-		for _, blockDevice := range conf.BlockDevices {
-			blockDevices[blockDevice.DeviceName] = blockDevice
+		for _, blockDevice := range conf.BlockDeviceMappings {
+			blockDevices[string(*blockDevice.DeviceName)] = blockDevice
 		}
 
 		// Check if the secondary block device exists.
@@ -123,8 +124,8 @@ func testAccCheckAWSLaunchConfigurationExists(n string, res *autoscaling.LaunchC
 
 		conn := testAccProvider.Meta().(*AWSClient).autoscalingconn
 
-		describeOpts := autoscaling.DescribeLaunchConfigurations{
-			Names: []string{rs.Primary.ID},
+		describeOpts := autoscaling.LaunchConfigurationNamesType{
+			LaunchConfigurationNames: []string{rs.Primary.ID},
 		}
 		describe, err := conn.DescribeLaunchConfigurations(&describeOpts)
 
@@ -133,7 +134,7 @@ func testAccCheckAWSLaunchConfigurationExists(n string, res *autoscaling.LaunchC
 		}
 
 		if len(describe.LaunchConfigurations) != 1 ||
-			describe.LaunchConfigurations[0].Name != rs.Primary.ID {
+			*describe.LaunchConfigurations[0].LaunchConfigurationName != rs.Primary.ID {
 			return fmt.Errorf("Launch Configuration Group not found")
 		}
 

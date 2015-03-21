@@ -60,7 +60,7 @@ type Schema struct {
 	//
 	// If Required is true above, then Default cannot be set. DefaultFunc
 	// can be set with Required. If the DefaultFunc returns nil, then there
-	// will no default and the user will be asked to fill it in.
+	// will be no default and the user will be asked to fill it in.
 	//
 	// If either of these is set, then the user won't be asked for input
 	// for this key if the default is not nil.
@@ -113,6 +113,21 @@ type Schema struct {
 	//
 	// NOTE: This currently does not work.
 	ComputedWhen []string
+
+	// When Deprecated is set, this attribute is deprecated.
+	//
+	// A deprecated field still works, but will probably stop working in near
+	// future. This string is the message shown to the user with instructions on
+	// how to address the deprecation.
+	Deprecated string
+
+	// When Removed is set, this attribute has been removed from the schema
+	//
+	// Removed attributes can be left in the Schema to generate informative error
+	// messages for the user when they show up in resource configurations.
+	// This string is the message shown to the user with instructions on
+	// what do to about the removed attribute.
+	Removed string
 }
 
 // SchemaDefaultFunc is a function called to return a default value for
@@ -661,10 +676,10 @@ func (m schemaMap) diffMap(
 
 	// Now we compare, preferring values from the config map
 	for k, v := range configMap {
-		old := stateMap[k]
+		old, ok := stateMap[k]
 		delete(stateMap, k)
 
-		if old == v && !all {
+		if old == v && ok && !all {
 			continue
 		}
 
@@ -810,10 +825,14 @@ func (m schemaMap) diffString(
 		originalN = n
 		n = schema.StateFunc(n)
 	}
+	nraw := n
+	if nraw == nil && o != nil {
+		nraw = schema.Type.Zero()
+	}
 	if err := mapstructure.WeakDecode(o, &os); err != nil {
 		return fmt.Errorf("%s: %s", k, err)
 	}
-	if err := mapstructure.WeakDecode(n, &ns); err != nil {
+	if err := mapstructure.WeakDecode(nraw, &ns); err != nil {
 		return fmt.Errorf("%s: %s", k, err)
 	}
 
@@ -873,7 +892,7 @@ func (m schemaMap) validate(
 		raw, err = schema.DefaultFunc()
 		if err != nil {
 			return nil, []error{fmt.Errorf(
-				"%s, error loading default: %s", k, err)}
+				"%q, error loading default: %s", k, err)}
 		}
 
 		// We're okay as long as we had a value set
@@ -882,7 +901,7 @@ func (m schemaMap) validate(
 	if !ok {
 		if schema.Required {
 			return nil, []error{fmt.Errorf(
-				"%s: required field is not set", k)}
+				"%q: required field is not set", k)}
 		}
 
 		return nil, nil
@@ -891,7 +910,7 @@ func (m schemaMap) validate(
 	if !schema.Required && !schema.Optional {
 		// This is a computed-only field
 		return nil, []error{fmt.Errorf(
-			"%s: this field cannot be set", k)}
+			"%q: this field cannot be set", k)}
 	}
 
 	return m.validateType(k, raw, schema, c)
@@ -1002,19 +1021,13 @@ func (m schemaMap) validateObject(
 	}
 
 	// Detect any extra/unknown keys and report those as errors.
-	prefix := k + "."
-	for configK, _ := range c.Raw {
-		if k != "" {
-			if !strings.HasPrefix(configK, prefix) {
-				continue
+	raw, _ := c.Get(k)
+	if m, ok := raw.(map[string]interface{}); ok {
+		for subk, _ := range m {
+			if _, ok := schema[subk]; !ok {
+				es = append(es, fmt.Errorf(
+					"%s: invalid or unknown key: %s", k, subk))
 			}
-
-			configK = configK[len(prefix):]
-		}
-
-		if _, ok := schema[configK]; !ok {
-			es = append(es, fmt.Errorf(
-				"%s: invalid or unknown key: %s", k, configK))
 		}
 	}
 
@@ -1068,14 +1081,54 @@ func (m schemaMap) validateType(
 	raw interface{},
 	schema *Schema,
 	c *terraform.ResourceConfig) ([]string, []error) {
+	var ws []string
+	var es []error
 	switch schema.Type {
 	case TypeSet:
 		fallthrough
 	case TypeList:
-		return m.validateList(k, raw, schema, c)
+		ws, es = m.validateList(k, raw, schema, c)
 	case TypeMap:
-		return m.validateMap(k, raw, schema, c)
+		ws, es = m.validateMap(k, raw, schema, c)
 	default:
-		return m.validatePrimitive(k, raw, schema, c)
+		ws, es = m.validatePrimitive(k, raw, schema, c)
+	}
+
+	if schema.Deprecated != "" {
+		ws = append(ws, fmt.Sprintf(
+			"%q: [DEPRECATED] %s", k, schema.Deprecated))
+	}
+
+	if schema.Removed != "" {
+		es = append(es, fmt.Errorf(
+			"%q: [REMOVED] %s", k, schema.Removed))
+	}
+
+	return ws, es
+}
+
+// Zero returns the zero value for a type.
+func (t ValueType) Zero() interface{} {
+	switch t {
+	case TypeInvalid:
+		return nil
+	case TypeBool:
+		return false
+	case TypeInt:
+		return 0
+	case TypeFloat:
+		return 0.0
+	case TypeString:
+		return ""
+	case TypeList:
+		return []interface{}{}
+	case TypeMap:
+		return map[string]interface{}{}
+	case TypeSet:
+		return new(Set)
+	case typeObject:
+		return map[string]interface{}{}
+	default:
+		panic(fmt.Sprintf("unknown type %s", t))
 	}
 }

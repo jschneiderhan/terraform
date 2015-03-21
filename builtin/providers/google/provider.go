@@ -11,7 +11,7 @@ func Provider() terraform.ResourceProvider {
 		Schema: map[string]*schema.Schema{
 			"account_file": &schema.Schema{
 				Type:        schema.TypeString,
-				Required:    true,
+				Optional:    true,
 				DefaultFunc: schema.EnvDefaultFunc("GOOGLE_ACCOUNT_FILE", nil),
 			},
 
@@ -35,6 +35,7 @@ func Provider() terraform.ResourceProvider {
 			"google_compute_forwarding_rule":   resourceComputeForwardingRule(),
 			"google_compute_http_health_check": resourceComputeHttpHealthCheck(),
 			"google_compute_instance":          resourceComputeInstance(),
+			"google_compute_instance_template": resourceComputeInstanceTemplate(),
 			"google_compute_network":           resourceComputeNetwork(),
 			"google_compute_route":             resourceComputeRoute(),
 			"google_compute_target_pool":       resourceComputeTargetPool(),

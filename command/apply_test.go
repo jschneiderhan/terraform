@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hashicorp/terraform/remote"
 	"github.com/hashicorp/terraform/terraform"
 	"github.com/mitchellh/cli"
 )
@@ -408,8 +407,9 @@ func TestApply_plan_remoteState(t *testing.T) {
 	defer func() { test = true }()
 	tmp, cwd := testCwd(t)
 	defer testFixCwd(t, tmp, cwd)
-	if err := remote.EnsureDirectory(); err != nil {
-		t.Fatalf("err: %v", err)
+	remoteStatePath := filepath.Join(tmp, DefaultDataDir, DefaultStateFilename)
+	if err := os.MkdirAll(filepath.Dir(remoteStatePath), 0755); err != nil {
+		t.Fatalf("err: %s", err)
 	}
 
 	// Set some default reader/writers for the inputs
@@ -448,21 +448,13 @@ func TestApply_plan_remoteState(t *testing.T) {
 	}
 
 	// State file should be not be installed
-	exists, err := remote.ExistsFile(DefaultStateFilename)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if exists {
+	if _, err := os.Stat(filepath.Join(tmp, DefaultStateFilename)); err == nil {
 		t.Fatalf("State path should not exist")
 	}
 
 	// Check for remote state
-	output, _, err := remote.ReadLocalState()
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if output == nil {
-		t.Fatalf("missing remote state")
+	if _, err := os.Stat(remoteStatePath); err != nil {
+		t.Fatalf("missing remote state: %s", err)
 	}
 }
 
@@ -968,6 +960,58 @@ func TestApply_varFileDefault(t *testing.T) {
 	}
 }
 
+func TestApply_varFileDefaultJSON(t *testing.T) {
+	varFileDir := testTempDir(t)
+	varFilePath := filepath.Join(varFileDir, "terraform.tfvars.json")
+	if err := ioutil.WriteFile(varFilePath, []byte(applyVarFileJSON), 0644); err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	statePath := testTempFile(t)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+	if err := os.Chdir(varFileDir); err != nil {
+		t.Fatalf("err: %s", err)
+	}
+	defer os.Chdir(cwd)
+
+	p := testProvider()
+	ui := new(cli.MockUi)
+	c := &ApplyCommand{
+		Meta: Meta{
+			ContextOpts: testCtxConfig(p),
+			Ui:          ui,
+		},
+	}
+
+	actual := ""
+	p.DiffFn = func(
+		info *terraform.InstanceInfo,
+		s *terraform.InstanceState,
+		c *terraform.ResourceConfig) (*terraform.InstanceDiff, error) {
+		if v, ok := c.Config["value"]; ok {
+			actual = v.(string)
+		}
+
+		return &terraform.InstanceDiff{}, nil
+	}
+
+	args := []string{
+		"-state", statePath,
+		testFixturePath("apply-vars"),
+	}
+	if code := c.Run(args); code != 0 {
+		t.Fatalf("bad: %d\n\n%s", code, ui.ErrorWriter.String())
+	}
+
+	if actual != "bar" {
+		t.Fatal("didn't work")
+	}
+}
+
 func TestApply_backup(t *testing.T) {
 	originalState := &terraform.State{
 		Modules: []*terraform.ModuleState{
@@ -1121,6 +1165,12 @@ func TestApply_disableBackup(t *testing.T) {
 	if err == nil || !os.IsNotExist(err) {
 		t.Fatalf("backup should not exist")
 	}
+
+	// Ensure there is no literal "-"
+	_, err = os.Stat("-")
+	if err == nil || !os.IsNotExist(err) {
+		t.Fatalf("backup should not exist")
+	}
 }
 
 func testHttpServer(t *testing.T) net.Listener {
@@ -1150,6 +1200,10 @@ func testHttpHandlerHeader(w http.ResponseWriter, r *http.Request) {
 
 const applyVarFile = `
 foo = "bar"
+`
+
+const applyVarFileJSON = `
+{ "foo": "bar" }
 `
 
 const testApplyDisableBackupStr = `

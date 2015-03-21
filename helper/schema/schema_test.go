@@ -111,7 +111,7 @@ func TestValueType_Zero(t *testing.T) {
 		{TypeString, ""},
 		{TypeList, []interface{}{}},
 		{TypeMap, map[string]interface{}{}},
-		{TypeSet, nil},
+		{TypeSet, new(Set)},
 	}
 
 	for i, tc := range cases {
@@ -1943,6 +1943,264 @@ func TestSchemaMap_Diff(t *testing.T) {
 			Diff: nil,
 			Err:  false,
 		},
+
+		// #48 - Zero value in state shouldn't result in diff
+		{
+			Schema: map[string]*Schema{
+				"port": &Schema{
+					Type:     TypeBool,
+					Optional: true,
+					ForceNew: true,
+				},
+			},
+
+			State: &terraform.InstanceState{
+				Attributes: map[string]string{
+					"port": "false",
+				},
+			},
+
+			Config: map[string]interface{}{},
+
+			Diff: nil,
+
+			Err: false,
+		},
+
+		// #49 Set - Same as #48 but for sets
+		{
+			Schema: map[string]*Schema{
+				"route": &Schema{
+					Type:     TypeSet,
+					Optional: true,
+					Elem: &Resource{
+						Schema: map[string]*Schema{
+							"index": &Schema{
+								Type:     TypeInt,
+								Required: true,
+							},
+
+							"gateway": &Schema{
+								Type:     TypeSet,
+								Optional: true,
+								Elem:     &Schema{Type: TypeInt},
+								Set: func(a interface{}) int {
+									return a.(int)
+								},
+							},
+						},
+					},
+					Set: func(v interface{}) int {
+						m := v.(map[string]interface{})
+						return m["index"].(int)
+					},
+				},
+			},
+
+			State: &terraform.InstanceState{
+				Attributes: map[string]string{
+					"route.#": "0",
+				},
+			},
+
+			Config: map[string]interface{}{},
+
+			Diff: nil,
+
+			Err: false,
+		},
+
+		// #50 - A set computed element shouldn't cause a diff
+		{
+			Schema: map[string]*Schema{
+				"active": &Schema{
+					Type:     TypeBool,
+					Computed: true,
+					ForceNew: true,
+				},
+			},
+
+			State: &terraform.InstanceState{
+				Attributes: map[string]string{
+					"active": "true",
+				},
+			},
+
+			Config: map[string]interface{}{},
+
+			Diff: nil,
+
+			Err: false,
+		},
+
+		// #51 - An empty set should show up in the diff
+		{
+			Schema: map[string]*Schema{
+				"instances": &Schema{
+					Type:     TypeSet,
+					Elem:     &Schema{Type: TypeString},
+					Optional: true,
+					ForceNew: true,
+					Set: func(v interface{}) int {
+						return len(v.(string))
+					},
+				},
+			},
+
+			State: &terraform.InstanceState{
+				Attributes: map[string]string{
+					"instances.#": "1",
+					"instances.3": "foo",
+				},
+			},
+
+			Config: map[string]interface{}{},
+
+			Diff: &terraform.InstanceDiff{
+				Attributes: map[string]*terraform.ResourceAttrDiff{
+					"instances.#": &terraform.ResourceAttrDiff{
+						Old:         "1",
+						New:         "0",
+						RequiresNew: true,
+					},
+				},
+			},
+
+			Err: false,
+		},
+
+		// #52 - Map with empty value
+		{
+			Schema: map[string]*Schema{
+				"vars": &Schema{
+					Type: TypeMap,
+				},
+			},
+
+			State: nil,
+
+			Config: map[string]interface{}{
+				"vars": map[string]interface{}{
+					"foo": "",
+				},
+			},
+
+			Diff: &terraform.InstanceDiff{
+				Attributes: map[string]*terraform.ResourceAttrDiff{
+					"vars.#": &terraform.ResourceAttrDiff{
+						Old: "0",
+						New: "1",
+					},
+					"vars.foo": &terraform.ResourceAttrDiff{
+						Old: "",
+						New: "",
+					},
+				},
+			},
+
+			Err: false,
+		},
+
+		// #53 - Unset bool, not in state
+		{
+			Schema: map[string]*Schema{
+				"force": &Schema{
+					Type:     TypeBool,
+					Optional: true,
+					ForceNew: true,
+				},
+			},
+
+			State: nil,
+
+			Config: map[string]interface{}{},
+
+			Diff: nil,
+
+			Err: false,
+		},
+
+		// #54 - Unset set, not in state
+		{
+			Schema: map[string]*Schema{
+				"metadata_keys": &Schema{
+					Type:     TypeSet,
+					Optional: true,
+					ForceNew: true,
+					Elem:     &Schema{Type: TypeInt},
+					Set:      func(interface{}) int { return 0 },
+				},
+			},
+
+			State: nil,
+
+			Config: map[string]interface{}{},
+
+			Diff: nil,
+
+			Err: false,
+		},
+
+		// #55 - Unset list in state, should not show up computed
+		{
+			Schema: map[string]*Schema{
+				"metadata_keys": &Schema{
+					Type:     TypeList,
+					Optional: true,
+					Computed: true,
+					ForceNew: true,
+					Elem:     &Schema{Type: TypeInt},
+				},
+			},
+
+			State: &terraform.InstanceState{
+				Attributes: map[string]string{
+					"metadata_keys.#": "0",
+				},
+			},
+
+			Config: map[string]interface{}{},
+
+			Diff: nil,
+
+			Err: false,
+		},
+
+		// #56 - Set element computed substring
+		{
+			Schema: map[string]*Schema{
+				"ports": &Schema{
+					Type:     TypeSet,
+					Required: true,
+					Elem:     &Schema{Type: TypeInt},
+					Set: func(a interface{}) int {
+						return a.(int)
+					},
+				},
+			},
+
+			State: nil,
+
+			Config: map[string]interface{}{
+				"ports": []interface{}{1, "${var.foo}32"},
+			},
+
+			ConfigVariables: map[string]string{
+				"var.foo": config.UnknownVariableValue,
+			},
+
+			Diff: &terraform.InstanceDiff{
+				Attributes: map[string]*terraform.ResourceAttrDiff{
+					"ports.#": &terraform.ResourceAttrDiff{
+						Old:         "",
+						New:         "",
+						NewComputed: true,
+					},
+				},
+			},
+
+			Err: false,
+		},
 	}
 
 	for i, tc := range cases {
@@ -2325,15 +2583,15 @@ func TestSchemaMap_InternalValidate(t *testing.T) {
 }
 
 func TestSchemaMap_Validate(t *testing.T) {
-	cases := []struct {
-		Schema map[string]*Schema
-		Config map[string]interface{}
-		Vars   map[string]string
-		Warn   bool
-		Err    bool
+	cases := map[string]struct {
+		Schema   map[string]*Schema
+		Config   map[string]interface{}
+		Vars     map[string]string
+		Err      bool
+		Errors   []error
+		Warnings []string
 	}{
-		// Good
-		{
+		"Good": {
 			Schema: map[string]*Schema{
 				"availability_zone": &Schema{
 					Type:     TypeString,
@@ -2348,8 +2606,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			},
 		},
 
-		// Good, because the var is not set and that error will come elsewhere
-		{
+		"Good, because the var is not set and that error will come elsewhere": {
 			Schema: map[string]*Schema{
 				"size": &Schema{
 					Type:     TypeInt,
@@ -2366,8 +2623,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			},
 		},
 
-		// Required field not set
-		{
+		"Required field not set": {
 			Schema: map[string]*Schema{
 				"availability_zone": &Schema{
 					Type:     TypeString,
@@ -2380,8 +2636,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Err: true,
 		},
 
-		// Invalid type
-		{
+		"Invalid basic type": {
 			Schema: map[string]*Schema{
 				"port": &Schema{
 					Type:     TypeInt,
@@ -2396,7 +2651,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Err: true,
 		},
 
-		{
+		"Invalid complex type": {
 			Schema: map[string]*Schema{
 				"user_data": &Schema{
 					Type:     TypeString,
@@ -2415,8 +2670,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Err: true,
 		},
 
-		// Bad type, interpolated
-		{
+		"Bad type, interpolated": {
 			Schema: map[string]*Schema{
 				"size": &Schema{
 					Type:     TypeInt,
@@ -2435,8 +2689,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Err: true,
 		},
 
-		// Required but has DefaultFunc
-		{
+		"Required but has DefaultFunc": {
 			Schema: map[string]*Schema{
 				"availability_zone": &Schema{
 					Type:     TypeString,
@@ -2450,8 +2703,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Config: nil,
 		},
 
-		// Required but has DefaultFunc return nil
-		{
+		"Required but has DefaultFunc return nil": {
 			Schema: map[string]*Schema{
 				"availability_zone": &Schema{
 					Type:     TypeString,
@@ -2467,8 +2719,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Err: true,
 		},
 
-		// Optional sub-resource
-		{
+		"Optional sub-resource": {
 			Schema: map[string]*Schema{
 				"ingress": &Schema{
 					Type: TypeList,
@@ -2488,8 +2739,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Err: false,
 		},
 
-		// Not a list
-		{
+		"Not a list": {
 			Schema: map[string]*Schema{
 				"ingress": &Schema{
 					Type: TypeList,
@@ -2511,8 +2761,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Err: true,
 		},
 
-		// Required sub-resource field
-		{
+		"Required sub-resource field": {
 			Schema: map[string]*Schema{
 				"ingress": &Schema{
 					Type: TypeList,
@@ -2536,8 +2785,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Err: true,
 		},
 
-		// Good sub-resource
-		{
+		"Good sub-resource": {
 			Schema: map[string]*Schema{
 				"ingress": &Schema{
 					Type:     TypeList,
@@ -2564,8 +2812,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Err: false,
 		},
 
-		// Invalid/unknown field
-		{
+		"Invalid/unknown field": {
 			Schema: map[string]*Schema{
 				"availability_zone": &Schema{
 					Type:     TypeString,
@@ -2582,8 +2829,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Err: true,
 		},
 
-		// Computed field set
-		{
+		"Computed field set": {
 			Schema: map[string]*Schema{
 				"availability_zone": &Schema{
 					Type:     TypeString,
@@ -2598,8 +2844,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Err: true,
 		},
 
-		// Not a set
-		{
+		"Not a set": {
 			Schema: map[string]*Schema{
 				"ports": &Schema{
 					Type:     TypeSet,
@@ -2618,8 +2863,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Err: true,
 		},
 
-		// Maps
-		{
+		"Maps": {
 			Schema: map[string]*Schema{
 				"user_data": &Schema{
 					Type:     TypeMap,
@@ -2634,7 +2878,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Err: true,
 		},
 
-		{
+		"Good map: data surrounded by extra slice": {
 			Schema: map[string]*Schema{
 				"user_data": &Schema{
 					Type:     TypeMap,
@@ -2651,7 +2895,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			},
 		},
 
-		{
+		"Good map": {
 			Schema: map[string]*Schema{
 				"user_data": &Schema{
 					Type:     TypeMap,
@@ -2666,7 +2910,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			},
 		},
 
-		{
+		"Bad map: just a slice": {
 			Schema: map[string]*Schema{
 				"user_data": &Schema{
 					Type:     TypeMap,
@@ -2683,7 +2927,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Err: true,
 		},
 
-		{
+		"Good set: config has slice with single interpolated value": {
 			Schema: map[string]*Schema{
 				"security_groups": &Schema{
 					Type:     TypeSet,
@@ -2704,7 +2948,7 @@ func TestSchemaMap_Validate(t *testing.T) {
 			Err: false,
 		},
 
-		{
+		"Bad set: config has single interpolated value": {
 			Schema: map[string]*Schema{
 				"security_groups": &Schema{
 					Type:     TypeSet,
@@ -2721,9 +2965,129 @@ func TestSchemaMap_Validate(t *testing.T) {
 
 			Err: true,
 		},
+
+		"Bad, subresource should not allow unknown elements": {
+			Schema: map[string]*Schema{
+				"ingress": &Schema{
+					Type:     TypeList,
+					Optional: true,
+					Elem: &Resource{
+						Schema: map[string]*Schema{
+							"port": &Schema{
+								Type:     TypeInt,
+								Required: true,
+							},
+						},
+					},
+				},
+			},
+
+			Config: map[string]interface{}{
+				"ingress": []interface{}{
+					map[string]interface{}{
+						"port":  80,
+						"other": "yes",
+					},
+				},
+			},
+
+			Err: true,
+		},
+
+		"Bad, subresource should not allow invalid types": {
+			Schema: map[string]*Schema{
+				"ingress": &Schema{
+					Type:     TypeList,
+					Optional: true,
+					Elem: &Resource{
+						Schema: map[string]*Schema{
+							"port": &Schema{
+								Type:     TypeInt,
+								Required: true,
+							},
+						},
+					},
+				},
+			},
+
+			Config: map[string]interface{}{
+				"ingress": []interface{}{
+					map[string]interface{}{
+						"port": "bad",
+					},
+				},
+			},
+
+			Err: true,
+		},
+
+		"Deprecated attribute usage generates warning, but not error": {
+			Schema: map[string]*Schema{
+				"old_news": &Schema{
+					Type:       TypeString,
+					Optional:   true,
+					Deprecated: "please use 'new_news' instead",
+				},
+			},
+
+			Config: map[string]interface{}{
+				"old_news": "extra extra!",
+			},
+
+			Err: false,
+
+			Warnings: []string{
+				"\"old_news\": [DEPRECATED] please use 'new_news' instead",
+			},
+		},
+
+		"Deprecated generates no warnings if attr not used": {
+			Schema: map[string]*Schema{
+				"old_news": &Schema{
+					Type:       TypeString,
+					Optional:   true,
+					Deprecated: "please use 'new_news' instead",
+				},
+			},
+
+			Err: false,
+
+			Warnings: nil,
+		},
+
+		"Removed attribute usage generates error": {
+			Schema: map[string]*Schema{
+				"long_gone": &Schema{
+					Type:     TypeString,
+					Optional: true,
+					Removed:  "no longer supported by Cloud API",
+				},
+			},
+
+			Config: map[string]interface{}{
+				"long_gone": "still here!",
+			},
+
+			Err: true,
+			Errors: []error{
+				fmt.Errorf("\"long_gone\": [REMOVED] no longer supported by Cloud API"),
+			},
+		},
+
+		"Removed generates no errors if attr not used": {
+			Schema: map[string]*Schema{
+				"long_gone": &Schema{
+					Type:     TypeString,
+					Optional: true,
+					Removed:  "no longer supported by Cloud API",
+				},
+			},
+
+			Err: false,
+		},
 	}
 
-	for i, tc := range cases {
+	for tn, tc := range cases {
 		c, err := config.NewRawConfig(tc.Config)
 		if err != nil {
 			t.Fatalf("err: %s", err)
@@ -2742,18 +3106,24 @@ func TestSchemaMap_Validate(t *testing.T) {
 		ws, es := schemaMap(tc.Schema).Validate(terraform.NewResourceConfig(c))
 		if (len(es) > 0) != tc.Err {
 			if len(es) == 0 {
-				t.Errorf("%d: no errors", i)
+				t.Errorf("%q: no errors", tn)
 			}
 
 			for _, e := range es {
-				t.Errorf("%d: err: %s", i, e)
+				t.Errorf("%q: err: %s", tn, e)
 			}
 
 			t.FailNow()
 		}
 
-		if (len(ws) > 0) != tc.Warn {
-			t.Fatalf("%d: ws: %#v", i, ws)
+		if !reflect.DeepEqual(ws, tc.Warnings) {
+			t.Fatalf("%q: warnings:\n\nexpected: %#v\ngot:%#v", tn, tc.Warnings, ws)
+		}
+
+		if tc.Errors != nil {
+			if !reflect.DeepEqual(es, tc.Errors) {
+				t.Fatalf("%q: errors:\n\nexpected: %q\ngot: %q", tn, tc.Errors, es)
+			}
 		}
 	}
 }

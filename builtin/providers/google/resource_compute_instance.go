@@ -54,11 +54,13 @@ func resourceComputeInstance() *schema.Resource {
 						"disk": &schema.Schema{
 							Type:     schema.TypeString,
 							Optional: true,
+							ForceNew: true,
 						},
 
 						"image": &schema.Schema{
 							Type:     schema.TypeString,
 							Optional: true,
+							ForceNew: true,
 						},
 
 						"type": &schema.Schema{
@@ -70,6 +72,46 @@ func resourceComputeInstance() *schema.Resource {
 						"auto_delete": &schema.Schema{
 							Type:     schema.TypeBool,
 							Optional: true,
+							ForceNew: true,
+						},
+					},
+				},
+			},
+
+			"network_interface": &schema.Schema{
+				Type:     schema.TypeList,
+				Optional: true,
+				ForceNew: true,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"network": &schema.Schema{
+							Type:     schema.TypeString,
+							Required: true,
+							ForceNew: true,
+						},
+
+						"name": &schema.Schema{
+							Type:     schema.TypeString,
+							Computed: true,
+						},
+
+						"address": &schema.Schema{
+							Type:     schema.TypeString,
+							Computed: true,
+						},
+
+						"access_config": &schema.Schema{
+							Type:     schema.TypeList,
+							Optional: true,
+							Elem: &schema.Resource{
+								Schema: map[string]*schema.Schema{
+									"nat_ip": &schema.Schema{
+										Type:     schema.TypeString,
+										Computed: true,
+										Optional: true,
+									},
+								},
+							},
 						},
 					},
 				},
@@ -77,18 +119,20 @@ func resourceComputeInstance() *schema.Resource {
 
 			"network": &schema.Schema{
 				Type:     schema.TypeList,
-				Required: true,
+				Optional: true,
 				ForceNew: true,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
 						"source": &schema.Schema{
 							Type:     schema.TypeString,
 							Required: true,
+							ForceNew: true,
 						},
 
 						"address": &schema.Schema{
 							Type:     schema.TypeString,
 							Optional: true,
+							ForceNew: true,
 						},
 
 						"name": &schema.Schema{
@@ -178,6 +222,32 @@ func resourceComputeInstance() *schema.Resource {
 	}
 }
 
+func resourceOperationWaitZone(
+	config *Config, op *compute.Operation, zone string, activity string) error {
+
+	w := &OperationWaiter{
+		Service: config.clientCompute,
+		Op:      op,
+		Project: config.Project,
+		Zone:    zone,
+		Type:    OperationWaitZone,
+	}
+	state := w.Conf()
+	state.Delay = 10 * time.Second
+	state.Timeout = 10 * time.Minute
+	state.MinTimeout = 2 * time.Second
+	opRaw, err := state.WaitForState()
+	if err != nil {
+		return fmt.Errorf("Error waiting for %s: %s", activity, err)
+	}
+	op = opRaw.(*compute.Operation)
+	if op.Error != nil {
+		// Return the error
+		return OperationError(*op.Error)
+	}
+	return nil
+}
+
 func resourceComputeInstanceCreate(d *schema.ResourceData, meta interface{}) error {
 	config := meta.(*Config)
 
@@ -236,15 +306,16 @@ func resourceComputeInstanceCreate(d *schema.ResourceData, meta interface{}) err
 		// Load up the image for this disk if specified
 		if v, ok := d.GetOk(prefix + ".image"); ok {
 			imageName := v.(string)
-			image, err := readImage(config, imageName)
+
+			imageUrl, err := resolveImage(config, imageName)
 			if err != nil {
 				return fmt.Errorf(
-					"Error loading image '%s': %s",
+					"Error resolving image name '%s': %s",
 					imageName, err)
 			}
 
 			disk.InitializeParams = &compute.AttachedDiskInitializeParams{
-				SourceImage: image.SelfLink,
+				SourceImage: imageUrl,
 			}
 		}
 
@@ -263,32 +334,80 @@ func resourceComputeInstanceCreate(d *schema.ResourceData, meta interface{}) err
 		disks = append(disks, &disk)
 	}
 
-	// Build up the list of networks
 	networksCount := d.Get("network.#").(int)
-	networks := make([]*compute.NetworkInterface, 0, networksCount)
-	for i := 0; i < networksCount; i++ {
-		prefix := fmt.Sprintf("network.%d", i)
-		// Load up the name of this network
-		networkName := d.Get(prefix + ".source").(string)
-		network, err := config.clientCompute.Networks.Get(
-			config.Project, networkName).Do()
-		if err != nil {
-			return fmt.Errorf(
-				"Error loading network '%s': %s",
-				networkName, err)
-		}
+	networkInterfacesCount := d.Get("network_interface.#").(int)
 
-		// Build the disk
-		var iface compute.NetworkInterface
-		iface.AccessConfigs = []*compute.AccessConfig{
-			&compute.AccessConfig{
-				Type:  "ONE_TO_ONE_NAT",
-				NatIP: d.Get(prefix + ".address").(string),
-			},
-		}
-		iface.Network = network.SelfLink
+	if networksCount > 0 && networkInterfacesCount > 0 {
+		return fmt.Errorf("Error: cannot define both networks and network_interfaces.")
+	}
+	if networksCount == 0 && networkInterfacesCount == 0 {
+		return fmt.Errorf("Error: Must define at least one network_interface.")
+	}
 
-		networks = append(networks, &iface)
+	var networkInterfaces []*compute.NetworkInterface
+
+	if networksCount > 0 {
+		// TODO: Delete this block when removing network { }
+		// Build up the list of networkInterfaces
+		networkInterfaces = make([]*compute.NetworkInterface, 0, networksCount)
+		for i := 0; i < networksCount; i++ {
+			prefix := fmt.Sprintf("network.%d", i)
+			// Load up the name of this network
+			networkName := d.Get(prefix + ".source").(string)
+			network, err := config.clientCompute.Networks.Get(
+				config.Project, networkName).Do()
+			if err != nil {
+				return fmt.Errorf(
+					"Error loading network '%s': %s",
+					networkName, err)
+			}
+
+			// Build the networkInterface
+			var iface compute.NetworkInterface
+			iface.AccessConfigs = []*compute.AccessConfig{
+				&compute.AccessConfig{
+					Type:  "ONE_TO_ONE_NAT",
+					NatIP: d.Get(prefix + ".address").(string),
+				},
+			}
+			iface.Network = network.SelfLink
+
+			networkInterfaces = append(networkInterfaces, &iface)
+		}
+	}
+
+	if networkInterfacesCount > 0 {
+		// Build up the list of networkInterfaces
+		networkInterfaces = make([]*compute.NetworkInterface, 0, networkInterfacesCount)
+		for i := 0; i < networkInterfacesCount; i++ {
+			prefix := fmt.Sprintf("network_interface.%d", i)
+			// Load up the name of this network_interfac
+			networkName := d.Get(prefix + ".network").(string)
+			network, err := config.clientCompute.Networks.Get(
+				config.Project, networkName).Do()
+			if err != nil {
+				return fmt.Errorf(
+					"Error referencing network '%s': %s",
+					networkName, err)
+			}
+
+			// Build the networkInterface
+			var iface compute.NetworkInterface
+			iface.Network = network.SelfLink
+
+			// Handle access_config structs
+			accessConfigsCount := d.Get(prefix + ".access_config.#").(int)
+			iface.AccessConfigs = make([]*compute.AccessConfig, accessConfigsCount)
+			for j := 0; j < accessConfigsCount; j++ {
+				acPrefix := fmt.Sprintf("%s.access_config.%d", prefix, j)
+				iface.AccessConfigs[j] = &compute.AccessConfig{
+					Type:  "ONE_TO_ONE_NAT",
+					NatIP: d.Get(acPrefix + ".nat_ip").(string),
+				}
+			}
+
+			networkInterfaces = append(networkInterfaces, &iface)
+		}
 	}
 
 	serviceAccountsCount := d.Get("service_account.#").(int)
@@ -319,7 +438,7 @@ func resourceComputeInstanceCreate(d *schema.ResourceData, meta interface{}) err
 		MachineType:       machineType.SelfLink,
 		Metadata:          resourceInstanceMetadata(d),
 		Name:              d.Get("name").(string),
-		NetworkInterfaces: networks,
+		NetworkInterfaces: networkInterfaces,
 		Tags:              resourceInstanceTags(d),
 		ServiceAccounts:   serviceAccounts,
 	}
@@ -335,28 +454,11 @@ func resourceComputeInstanceCreate(d *schema.ResourceData, meta interface{}) err
 	d.SetId(instance.Name)
 
 	// Wait for the operation to complete
-	w := &OperationWaiter{
-		Service: config.clientCompute,
-		Op:      op,
-		Project: config.Project,
-		Zone:    zone.Name,
-		Type:    OperationWaitZone,
-	}
-	state := w.Conf()
-	state.Delay = 10 * time.Second
-	state.Timeout = 10 * time.Minute
-	state.MinTimeout = 2 * time.Second
-	opRaw, err := state.WaitForState()
-	if err != nil {
-		return fmt.Errorf("Error waiting for instance to create: %s", err)
-	}
-	op = opRaw.(*compute.Operation)
-	if op.Error != nil {
+	waitErr := resourceOperationWaitZone(config, op, zone.Name, "instance to create")
+	if waitErr != nil {
 		// The resource didn't actually create
 		d.SetId("")
-
-		// Return the error
-		return OperationError(*op.Error)
+		return waitErr
 	}
 
 	return resourceComputeInstanceRead(d, meta)
@@ -381,35 +483,105 @@ func resourceComputeInstanceRead(d *schema.ResourceData, meta interface{}) error
 	d.Set("can_ip_forward", instance.CanIpForward)
 
 	// Set the service accounts
-	for i, serviceAccount := range instance.ServiceAccounts {
-		prefix := fmt.Sprintf("service_account.%d", i)
-		d.Set(prefix+".email", serviceAccount.Email)
-		d.Set(prefix+".scopes.#", len(serviceAccount.Scopes))
-		for j, scope := range serviceAccount.Scopes {
-			d.Set(fmt.Sprintf("%s.scopes.%d", prefix, j), scope)
+	serviceAccounts := make([]map[string]interface{}, 0, 1)
+	for _, serviceAccount := range instance.ServiceAccounts {
+		scopes := make([]string, len(serviceAccount.Scopes))
+		for i, scope := range serviceAccount.Scopes {
+			scopes[i] = scope
 		}
+
+		serviceAccounts = append(serviceAccounts, map[string]interface{}{
+			"email":  serviceAccount.Email,
+			"scopes": scopes,
+		})
+	}
+	d.Set("service_account", serviceAccounts)
+
+	networksCount := d.Get("network.#").(int)
+	networkInterfacesCount := d.Get("network_interface.#").(int)
+
+	if networksCount > 0 && networkInterfacesCount > 0 {
+		return fmt.Errorf("Error: cannot define both networks and network_interfaces.")
+	}
+	if networksCount == 0 && networkInterfacesCount == 0 {
+		return fmt.Errorf("Error: Must define at least one network_interface.")
 	}
 
 	// Set the networks
+	// Use the first external IP found for the default connection info.
 	externalIP := ""
-	for i, iface := range instance.NetworkInterfaces {
-		prefix := fmt.Sprintf("network.%d", i)
-		d.Set(prefix+".name", iface.Name)
+	internalIP := ""
+	networks := make([]map[string]interface{}, 0, 1)
+	if networksCount > 0 {
+		// TODO: Remove this when realizing deprecation of .network
+		for _, iface := range instance.NetworkInterfaces {
+			var natIP string
+			for _, config := range iface.AccessConfigs {
+				if config.Type == "ONE_TO_ONE_NAT" {
+					natIP = config.NatIP
+					break
+				}
+			}
 
-		// Use the first external IP found for the default connection info.
-		natIP := resourceInstanceNatIP(iface)
-		if externalIP == "" && natIP != "" {
-			externalIP = natIP
+			if externalIP == "" && natIP != "" {
+				externalIP = natIP
+			}
+
+			network := make(map[string]interface{})
+			network["name"] = iface.Name
+			network["external_address"] = natIP
+			network["internal_address"] = iface.NetworkIP
+			networks = append(networks, network)
 		}
-		d.Set(prefix+".external_address", natIP)
+	}
+	d.Set("network", networks)
 
-		d.Set(prefix+".internal_address", iface.NetworkIP)
+	networkInterfaces := make([]map[string]interface{}, 0, 1)
+	if networkInterfacesCount > 0 {
+		for _, iface := range instance.NetworkInterfaces {
+			// The first non-empty ip is left in natIP
+			var natIP string
+			accessConfigs := make(
+				[]map[string]interface{}, 0, len(iface.AccessConfigs))
+			for _, config := range iface.AccessConfigs {
+				accessConfigs = append(accessConfigs, map[string]interface{}{
+					"nat_ip": config.NatIP,
+				})
+
+				if natIP == "" {
+					natIP = config.NatIP
+				}
+			}
+
+			if externalIP == "" {
+				externalIP = natIP
+			}
+
+			if internalIP == "" {
+				internalIP = iface.NetworkIP
+			}
+
+			networkInterfaces = append(networkInterfaces, map[string]interface{}{
+				"name":          iface.Name,
+				"address":       iface.NetworkIP,
+				"access_config": accessConfigs,
+			})
+		}
+	}
+	d.Set("network_interface", networkInterfaces)
+
+	// Fall back on internal ip if there is no external ip.  This makes sense in the situation where
+	// terraform is being used on a cloud instance and can therefore access the instances it creates
+	// via their internal ips.
+	sshIP := externalIP
+	if sshIP == "" {
+		sshIP = internalIP
 	}
 
 	// Initialize the connection info
 	d.SetConnInfo(map[string]string{
 		"type": "ssh",
-		"host": externalIP,
+		"host": sshIP,
 	})
 
 	// Set the metadata fingerprint if there is one.
@@ -430,6 +602,21 @@ func resourceComputeInstanceRead(d *schema.ResourceData, meta interface{}) error
 func resourceComputeInstanceUpdate(d *schema.ResourceData, meta interface{}) error {
 	config := meta.(*Config)
 
+	zone := d.Get("zone").(string)
+
+	instance, err := config.clientCompute.Instances.Get(
+		config.Project, zone, d.Id()).Do()
+	if err != nil {
+		if gerr, ok := err.(*googleapi.Error); ok && gerr.Code == 404 {
+			// The resource doesn't exist anymore
+			d.SetId("")
+
+			return nil
+		}
+
+		return fmt.Errorf("Error reading instance: %s", err)
+	}
+
 	// Enable partial mode for the resource since it is possible
 	d.Partial(true)
 
@@ -437,30 +624,15 @@ func resourceComputeInstanceUpdate(d *schema.ResourceData, meta interface{}) err
 	if d.HasChange("metadata") {
 		metadata := resourceInstanceMetadata(d)
 		op, err := config.clientCompute.Instances.SetMetadata(
-			config.Project, d.Get("zone").(string), d.Id(), metadata).Do()
+			config.Project, zone, d.Id(), metadata).Do()
 		if err != nil {
 			return fmt.Errorf("Error updating metadata: %s", err)
 		}
 
-		w := &OperationWaiter{
-			Service: config.clientCompute,
-			Op:      op,
-			Project: config.Project,
-			Zone:    d.Get("zone").(string),
-			Type:    OperationWaitZone,
-		}
-		state := w.Conf()
-		state.Delay = 1 * time.Second
-		state.Timeout = 5 * time.Minute
-		state.MinTimeout = 2 * time.Second
-		opRaw, err := state.WaitForState()
-		if err != nil {
-			return fmt.Errorf("Error waiting for metadata to update: %s", err)
-		}
-		op = opRaw.(*compute.Operation)
-		if op.Error != nil {
-			// Return the error
-			return OperationError(*op.Error)
+		// 1 5 2
+		opErr := resourceOperationWaitZone(config, op, zone, "metadata to update")
+		if opErr != nil {
+			return opErr
 		}
 
 		d.SetPartial("metadata")
@@ -469,33 +641,78 @@ func resourceComputeInstanceUpdate(d *schema.ResourceData, meta interface{}) err
 	if d.HasChange("tags") {
 		tags := resourceInstanceTags(d)
 		op, err := config.clientCompute.Instances.SetTags(
-			config.Project, d.Get("zone").(string), d.Id(), tags).Do()
+			config.Project, zone, d.Id(), tags).Do()
 		if err != nil {
 			return fmt.Errorf("Error updating tags: %s", err)
 		}
 
-		w := &OperationWaiter{
-			Service: config.clientCompute,
-			Op:      op,
-			Project: config.Project,
-			Zone:    d.Get("zone").(string),
-			Type:    OperationWaitZone,
-		}
-		state := w.Conf()
-		state.Delay = 1 * time.Second
-		state.Timeout = 5 * time.Minute
-		state.MinTimeout = 2 * time.Second
-		opRaw, err := state.WaitForState()
-		if err != nil {
-			return fmt.Errorf("Error waiting for tags to update: %s", err)
-		}
-		op = opRaw.(*compute.Operation)
-		if op.Error != nil {
-			// Return the error
-			return OperationError(*op.Error)
+		opErr := resourceOperationWaitZone(config, op, zone, "tags to update")
+		if opErr != nil {
+			return opErr
 		}
 
 		d.SetPartial("tags")
+	}
+
+	networkInterfacesCount := d.Get("network_interface.#").(int)
+	if networkInterfacesCount > 0 {
+		// Sanity check
+		if networkInterfacesCount != len(instance.NetworkInterfaces) {
+			return fmt.Errorf("Instance had unexpected number of network interfaces: %d", len(instance.NetworkInterfaces))
+		}
+		for i := 0; i < networkInterfacesCount; i++ {
+			prefix := fmt.Sprintf("network_interface.%d", i)
+			instNetworkInterface := instance.NetworkInterfaces[i]
+			networkName := d.Get(prefix + ".name").(string)
+
+			// TODO: This sanity check is broken by #929, disabled for now (by forcing the equality)
+			networkName = instNetworkInterface.Name
+			// Sanity check
+			if networkName != instNetworkInterface.Name {
+				return fmt.Errorf("Instance networkInterface had unexpected name: %s", instNetworkInterface.Name)
+			}
+
+			if d.HasChange(prefix + ".access_config") {
+
+				// TODO: This code deletes then recreates accessConfigs.  This is bad because it may
+				// leave the machine inaccessible from either ip if the creation part fails (network
+				// timeout etc).  However right now there is a GCE limit of 1 accessConfig so it is
+				// the only way to do it.  In future this should be revised to only change what is
+				// necessary, and also add before removing.
+
+				// Delete any accessConfig that currently exists in instNetworkInterface
+				for _, ac := range instNetworkInterface.AccessConfigs {
+					op, err := config.clientCompute.Instances.DeleteAccessConfig(
+						config.Project, zone, d.Id(), ac.Name, networkName).Do()
+					if err != nil {
+						return fmt.Errorf("Error deleting old access_config: %s", err)
+					}
+					opErr := resourceOperationWaitZone(config, op, zone, "old access_config to delete")
+					if opErr != nil {
+						return opErr
+					}
+				}
+
+				// Create new ones
+				accessConfigsCount := d.Get(prefix + ".access_config.#").(int)
+				for j := 0; j < accessConfigsCount; j++ {
+					acPrefix := fmt.Sprintf("%s.access_config.%d", prefix, j)
+					ac := &compute.AccessConfig{
+						Type:  "ONE_TO_ONE_NAT",
+						NatIP: d.Get(acPrefix + ".nat_ip").(string),
+					}
+					op, err := config.clientCompute.Instances.AddAccessConfig(
+						config.Project, zone, d.Id(), networkName, ac).Do()
+					if err != nil {
+						return fmt.Errorf("Error adding new access_config: %s", err)
+					}
+					opErr := resourceOperationWaitZone(config, op, zone, "new access_config to add")
+					if opErr != nil {
+						return opErr
+					}
+				}
+			}
+		}
 	}
 
 	// We made it, disable partial mode
@@ -507,32 +724,16 @@ func resourceComputeInstanceUpdate(d *schema.ResourceData, meta interface{}) err
 func resourceComputeInstanceDelete(d *schema.ResourceData, meta interface{}) error {
 	config := meta.(*Config)
 
-	op, err := config.clientCompute.Instances.Delete(
-		config.Project, d.Get("zone").(string), d.Id()).Do()
+	zone := d.Get("zone").(string)
+	op, err := config.clientCompute.Instances.Delete(config.Project, zone, d.Id()).Do()
 	if err != nil {
 		return fmt.Errorf("Error deleting instance: %s", err)
 	}
 
 	// Wait for the operation to complete
-	w := &OperationWaiter{
-		Service: config.clientCompute,
-		Op:      op,
-		Project: config.Project,
-		Zone:    d.Get("zone").(string),
-		Type:    OperationWaitZone,
-	}
-	state := w.Conf()
-	state.Delay = 5 * time.Second
-	state.Timeout = 5 * time.Minute
-	state.MinTimeout = 2 * time.Second
-	opRaw, err := state.WaitForState()
-	if err != nil {
-		return fmt.Errorf("Error waiting for instance to delete: %s", err)
-	}
-	op = opRaw.(*compute.Operation)
-	if op.Error != nil {
-		// Return the error
-		return OperationError(*op.Error)
+	opErr := resourceOperationWaitZone(config, op, zone, "instance to delete")
+	if opErr != nil {
+		return opErr
 	}
 
 	d.SetId("")
@@ -583,17 +784,4 @@ func resourceInstanceTags(d *schema.ResourceData) *compute.Tags {
 	}
 
 	return tags
-}
-
-// resourceInstanceNatIP acquires the first NatIP with a "ONE_TO_ONE_NAT" type
-// in the compute.NetworkInterface's AccessConfigs.
-func resourceInstanceNatIP(iface *compute.NetworkInterface) (natIP string) {
-	for _, config := range iface.AccessConfigs {
-		if config.Type == "ONE_TO_ONE_NAT" {
-			natIP = config.NatIP
-			break
-		}
-	}
-
-	return natIP
 }
